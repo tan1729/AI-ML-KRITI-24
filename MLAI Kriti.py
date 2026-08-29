@@ -1,107 +1,344 @@
+import ast
 import pandas as pd
 import numpy as np
+
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Embedding, SpatialDropout1D, LSTM, Dense
 from tensorflow.keras.preprocessing.text import Tokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
+
 from sklearn.preprocessing import MultiLabelBinarizer
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import (
+    f1_score,
+    precision_score,
+    recall_score
+)
 
-# Load data
-train_df = pd.read_csv('train.csv')
-test_df = pd.read_csv('test.csv')
-sub_format=pd.read_csv("sample_submission.csv")
-# Combine title and abstract
-train_df['text'] = train_df['Title'] + ' ' + train_df['Abstract']
-test_df['text'] = test_df['Title'] + ' ' + test_df['Abstract']
 
-# Tokenization
-tokenizer = Tokenizer(num_words=5000)
-tokenizer.fit_on_texts(train_df['text'])
+# ============================================================
+# 1. LOAD DATA
+# ============================================================
 
-train_sequences = tokenizer.texts_to_sequences(train_df['text'])
-test_sequences = tokenizer.texts_to_sequences(test_df['text'])
+train_df = pd.read_csv("train.csv")
+test_df = pd.read_csv("test.csv")
+sub_format = pd.read_csv("sample_submission.csv")
 
-# Padding sequences
-max_length = max([len(seq) for seq in train_sequences])
-train_padded = pad_sequences(train_sequences, maxlen=max_length)
-test_padded = pad_sequences(test_sequences, maxlen=max_length)
+print("Training samples:", len(train_df))
+print("Test samples:", len(test_df))
 
-# Convert categories to one-hot encoding
-# encoder = LabelBinarizer()
-# train_labels = encoder.fit_transform(train_df['Categories'])
+
+# ============================================================
+# 2. PREPARE TEXT
+#    Combine Title + Abstract
+# ============================================================
+
+train_df["text"] = (
+    train_df["Title"].fillna("") + " " +
+    train_df["Abstract"].fillna("")
+)
+
+test_df["text"] = (
+    test_df["Title"].fillna("") + " " +
+    test_df["Abstract"].fillna("")
+)
+
+
+# ============================================================
+# 3. CONVERT CATEGORY STRINGS TO LISTS
+# ============================================================
+
+train_df["Categories"] = train_df["Categories"].apply(
+    ast.literal_eval
+)
+
+
+# ============================================================
+# 4. MULTI-LABEL ENCODING
+# ============================================================
+
 mlb = MultiLabelBinarizer()
-train_df['Categories'] = train_df['Categories'].apply(eval)  # Convert string representations to lists
-train_labels = mlb.fit_transform(train_df['Categories'])
+
+train_labels = mlb.fit_transform(
+    train_df["Categories"]
+)
+
+num_classes = len(mlb.classes_)
+
+print("Number of categories:", num_classes)
+print("Label matrix shape:", train_labels.shape)
+
+
+# ============================================================
+# 5. TRAIN / VALIDATION SPLIT
+# ============================================================
+
+X_text = train_df["text"].values
+y = train_labels
+
+X_train_text, X_val_text, y_train, y_val = train_test_split(
+    X_text,
+    y,
+    test_size=0.10,
+    random_state=42
+)
+
+print("Training samples after split:", len(X_train_text))
+print("Validation samples:", len(X_val_text))
+
+
+# ============================================================
+# 6. TOKENIZATION
+#    Fit tokenizer ONLY on training text
+# ============================================================
+
+MAX_WORDS = 5000
+
+tokenizer = Tokenizer(
+    num_words=MAX_WORDS
+)
+
+tokenizer.fit_on_texts(X_train_text)
+
+
+# Convert text to sequences
+
+X_train_seq = tokenizer.texts_to_sequences(X_train_text)
+X_val_seq = tokenizer.texts_to_sequences(X_val_text)
+X_test_seq = tokenizer.texts_to_sequences(
+    test_df["text"]
+)
+
+
+# ============================================================
+# 7. PADDING
+# ============================================================
+
+max_length = max(
+    len(seq) for seq in X_train_seq
+)
+
+print("Maximum sequence length:", max_length)
+
+X_train_pad = pad_sequences(
+    X_train_seq,
+    maxlen=max_length
+)
+
+X_val_pad = pad_sequences(
+    X_val_seq,
+    maxlen=max_length
+)
+
+X_test_pad = pad_sequences(
+    X_test_seq,
+    maxlen=max_length
+)
+
+
+# ============================================================
+# 8. BUILD LSTM MODEL
+# ============================================================
 
 model = Sequential()
-model.add(Embedding(input_dim=5000, output_dim=50, input_length=max_length))
-model.add(SpatialDropout1D(0.2))
-model.add(LSTM(100, dropout=0.2, recurrent_dropout=0.2))
-#model.add(Dense(train_labels.shape[1], activation='softmax'))
-model.add(Dense(len(mlb.classes_), activation='sigmoid'))
 
-model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
-#model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+model.add(
+    Embedding(
+        input_dim=MAX_WORDS,
+        output_dim=50,
+        input_length=max_length
+    )
+)
+
+model.add(
+    SpatialDropout1D(0.2)
+)
+
+model.add(
+    LSTM(
+        100,
+        dropout=0.2,
+        recurrent_dropout=0.2
+    )
+)
+
+model.add(
+    Dense(
+        num_classes,
+        activation="sigmoid"
+    )
+)
 
 
-batch_size = 64
-epochs = 5
+# ============================================================
+# 9. COMPILE MODEL
+# ============================================================
 
-model.fit(train_padded, train_labels, epochs=epochs, batch_size=batch_size, validation_split=0.1)
+model.compile(
+    loss="binary_crossentropy",
+    optimizer="adam",
+    metrics=["accuracy"]
+)
 
-predictions = model.predict(test_padded)
-# Convert predictions to binary labels based on a threshold (e.g., 0.5)
-binary_predictions = (predictions > 0.5).astype(int)
+model.summary()
 
-# Use inverse_transform to convert the binary labels back to the original class labels
-predicted_classes = mlb.inverse_transform(binary_predictions)
 
-# Convert predictions to binary labels
-#predicted_labels = (predictions > 0.5).astype(int)
-# Create submission DataFrame
-# submission_df = pd.DataFrame(predicted_labels, columns=mlb.classes_)
-# submission_df.insert(0, 'Id', test_df['Id'])
-# submission_df.to_csv('submission_corrected.csv', index=False)
+# ============================================================
+# 10. TRAIN MODEL
+# ============================================================
 
-ids=test_df["Id"]
-#m={}
-# for cl in sub_format.columns:
-#     m[cl]=0
-final_output=pd.DataFrame(columns=sub_format.columns)
+BATCH_SIZE = 64
+EPOCHS = 5
 
-to_add = []
+history = model.fit(
+    X_train_pad,
+    y_train,
+    epochs=EPOCHS,
+    batch_size=BATCH_SIZE,
+    validation_data=(X_val_pad, y_val),
+    verbose=1
+)
 
-# Iterate over each set of predicted classes and the corresponding ID
+
+# ============================================================
+# 11. VALIDATION PREDICTIONS
+# ============================================================
+
+val_predictions = model.predict(
+    X_val_pad,
+    verbose=1
+)
+
+
+# Convert probabilities to binary labels
+
+THRESHOLD = 0.5
+
+val_binary = (
+    val_predictions >= THRESHOLD
+).astype(int)
+
+
+# ============================================================
+# 12. EVALUATION METRICS
+# ============================================================
+
+micro_f1 = f1_score(
+    y_val,
+    val_binary,
+    average="micro",
+    zero_division=0
+)
+
+macro_f1 = f1_score(
+    y_val,
+    val_binary,
+    average="macro",
+    zero_division=0
+)
+
+micro_precision = precision_score(
+    y_val,
+    val_binary,
+    average="micro",
+    zero_division=0
+)
+
+micro_recall = recall_score(
+    y_val,
+    val_binary,
+    average="micro",
+    zero_division=0
+)
+
+
+# ============================================================
+# 13. PRINT FINAL VALIDATION RESULTS
+# ============================================================
+
+print("\n" + "=" * 50)
+print("VALIDATION RESULTS")
+print("=" * 50)
+
+print(f"Micro-F1:          {micro_f1:.4f}")
+print(f"Macro-F1:          {macro_f1:.4f}")
+print(f"Micro-Precision:   {micro_precision:.4f}")
+print(f"Micro-Recall:      {micro_recall:.4f}")
+
+print("=" * 50)
+
+
+# ============================================================
+# 14. TRAINED MODEL → TEST PREDICTIONS
+# ============================================================
+
+test_predictions = model.predict(
+    X_test_pad,
+    verbose=1
+)
+
+
+# Convert probabilities to binary labels
+
+test_binary = (
+    test_predictions >= THRESHOLD
+).astype(int)
+
+
+# Convert binary predictions back to category names
+
+predicted_classes = mlb.inverse_transform(
+    test_binary
+)
+
+
+# ============================================================
+# 15. CREATE SUBMISSION FILE
+# ============================================================
+
+ids = test_df["Id"]
+
+rows = []
+
 for idx, classes in enumerate(predicted_classes):
-    m = {cl: 0 for cl in sub_format.columns[1:]}  # Initialize the dictionary for current sample
-    for sub_class in classes:
-        if sub_class in m:  # Check if the predicted class is in the columns
-            m[sub_class] = 1  # Update the dictionary to indicate the presence of the class
-    row = [ids.iloc[idx]] + list(m.values())
-    to_add.append(row)
 
-    # Convert the accumulated rows into a DataFrame
-final_output = pd.DataFrame(to_add, columns=sub_format.columns)
+    # Start every category at 0
+    label_map = {
+        category: 0
+        for category in sub_format.columns[1:]
+    }
 
-# Save the DataFrame to a CSV file
-final_output.to_csv('submission_corrected11.csv', index=False)
+    # Mark predicted categories as 1
+    for category in classes:
+
+        if category in label_map:
+            label_map[category] = 1
+
+    row = [
+        ids.iloc[idx]
+    ] + list(label_map.values())
+
+    rows.append(row)
 
 
-to_add=[]
-cnt=0
-for classes in predicted_classes:
-    m={}
-    for cl in sub_format.columns[1:]:
-        m[cl]=0
-    for sub_class in eval(classes):
-        m[sub_class]=1
-    ans=[]
-    ans.append(ids[cnt])
-    to_add.append(ans+list(m.values()))
-    cnt+=1
+final_output = pd.DataFrame(
+    rows,
+    columns=sub_format.columns
+)
 
-    for row in to_add:
-    curr_len=len(final_output)
-    final_output.loc[curr_len]=row
 
-    final_output.to_csv('submission11.csv', index=False)
+# ============================================================
+# 16. SAVE SUBMISSION
+# ============================================================
+
+output_file = "submission_lstm.csv"
+
+final_output.to_csv(
+    output_file,
+    index=False
+)
+
+print("\nSubmission saved as:", output_file)
+print("Submission shape:", final_output.shape)
+print("Test predictions:", len(predicted_classes))
+print("Categories:", num_classes)
